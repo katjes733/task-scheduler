@@ -1,6 +1,9 @@
 """
 Scheduled task.
 """
+import logging
+from logging.handlers import TimedRotatingFileHandler
+import time
 import ssl
 import smtplib
 import os
@@ -9,11 +12,40 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 import requests
+from requests.exceptions import ConnectTimeout
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
-from rich.console import Console
+
+
+CONST_DEFAULT_TIMEOUT = 5
+CONST_ENCODING = 'utf-8'
 
 load_dotenv()
-console = Console()
+
+levels = {
+    'critical': logging.CRITICAL,
+    'error': logging.ERROR,
+    'warn': logging.WARNING,
+    'info': logging.INFO,
+    'debug': logging.DEBUG
+}
+logger = logging.getLogger()
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_output_handler = \
+    TimedRotatingFileHandler(
+        os.getenv('LOG_FILE', './task-scheduler.log'),
+        when="midnight",
+        encoding=CONST_ENCODING
+    )
+file_output_handler.setFormatter(formatter)
+logger.addHandler(file_output_handler)
+console_output_handler = logging.StreamHandler()
+console_output_handler.setFormatter(formatter)
+logger.addHandler(console_output_handler)
+try:
+    logger.setLevel(levels.get(os.getenv('LOG_LEVEL', 'info').lower()))
+except KeyError:
+    logger.setLevel(logging.INFO)
+
 
 smtp_port = os.getenv('SMTP_SERVER_PORT')
 smtp_server = os.getenv('SMTP_SERVER_ADDRESS')
@@ -22,6 +54,7 @@ sender_pw = os.getenv('SENDER_PASSWORD')
 recipients = os.getenv('RECIPIENT_EMAIL').split(',')
 
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
 
 def send_alert_html(title: str, message="<b>Unspecified error</b>"):
     """
@@ -45,13 +78,16 @@ def send_alert_html(title: str, message="<b>Unspecified error</b>"):
             server.login(sender_mail, sender_pw)
             server.sendmail(sender_mail, recipients, email_string)
     except Exception as error:
-        console.print(f"[b red]ERROR[/b red]: Cannot send alert: {str(error)}")
+        logger.error("Cannot send alert: %s", str(error))
+
 
 def check_rainmachine():
     """
     Checks the RainMachine.
     Performs a login and then retrieves the diagnostics.
     """
+    start_time = time.perf_counter()
+    logger.info("RainMachine check running...")
     base_url = \
         f"https://{os.getenv('RM_HOST')}:{os.getenv('RM_PORT')}/api/4/"
     headers = {
@@ -66,40 +102,52 @@ def check_rainmachine():
             f"{base_url}auth/login",
             headers=headers,
             json=auth_json,
-            verify=False
+            verify=False,
+            timeout=CONST_DEFAULT_TIMEOUT
         )
 
         if not response.ok:
-            console.print("[b red]ERROR[/b red]: Unable to login.")
+            logger.error("Unable to login.")
             send_alert_html(
                 "RainMachine connection problem",
                 "<p>Unable to login</p>"
                 "<p>RainMachine is likely offline</p>")
         else:
-            console.print("[b green]INFO [/b green]: Authenticated with RainMachine.")
+            logger.info("Authenticated successfully with RainMachine.")
             response = requests.get(
                 f"{base_url}diag?access_token="
                 f"{response.json()['access_token']}",
                 headers=headers,
-                verify=False
+                verify=False,
+                timeout=CONST_DEFAULT_TIMEOUT
             )
 
             if not response.ok:
-                console.print("[b red]ERROR[/b red]: Cannot get diagnostics.")
+                logger.error("Cannot get diagnostics.")
                 send_alert_html(
                     "RainMachine connection problem",
                     "<p>Login was successful, but cannot get diagnostics</p>"
-                    "<p>RainMachine likely offline</p>")
+                    "<p>RainMachine likely not operating correctly</p>")
             else:
-                console.print(f"[b green]INFO [/b green]: Diagnostics: {response.json()}")
-
+                logger.info("Diagnostics: %s", str(response.json()))
+    except ConnectTimeout as error:
+        logger.error("RainMachine is not online: %s", str(error))
+        send_alert_html(
+            "RainMachine is not online",
+            "<p>RainMachine did not respond within the given timeout "
+            "and is thus assumed to not be online.</p>"
+            f"<p>Detailed error: {str(error)}</p>")
     except Exception as error:
-        console.print(f"[b red]ERROR[/b red]: {str(error)}")
+        logger.error("Unexpected error checking Rainmachine: %s", str(error))
         send_alert_html(
             "RainMachine connection problem",
             "<p>An unexpected error occurred:</p>"
             f"<p>{str(error)}</p>")
+    logger.info(
+        "RainMachine check completed in "
+        f"{time.perf_counter() - start_time:0.3f} seconds")
+
 
 if __name__ == "__main__":
-    console.print(f"[b green]INFO [/b green]: Running script at [b blue]{datetime.now()}")
+    logger.info("Running checks at %s", datetime.now())
     check_rainmachine()
