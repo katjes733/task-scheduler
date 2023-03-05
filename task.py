@@ -16,7 +16,7 @@ from requests.exceptions import ConnectTimeout
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
 
-CONST_DEFAULT_TIMEOUT = 5
+CONST_DEFAULT_TIMEOUT = 10
 CONST_ENCODING = 'utf-8'
 
 load_dotenv()
